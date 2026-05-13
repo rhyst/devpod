@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 )
 
 func WriteTarExclude(
@@ -46,11 +48,8 @@ func WriteTarExclude(
 
 	// When its a file we copy the file to the toplevel of the tar
 	if !stat.IsDir() {
-		return NewArchiver(
-			filepath.Dir(absolute),
-			tarWriter,
-			excludedPaths,
-		).AddToArchive(filepath.Base(absolute))
+		return NewArchiver(filepath.Dir(absolute), tarWriter, excludedPaths).
+			AddToArchive(filepath.Base(absolute))
 	}
 
 	// When its a folder we copy the contents and not the folder itself to the
@@ -68,17 +67,26 @@ type Archiver struct {
 	writer       *tar.Writer
 	writtenFiles map[string]bool
 
-	excludedPaths []string
+	matcher gitignore.Matcher
 }
 
-// NewArchiver creates a new archiver.
+// NewArchiver creates a new archiver. excludedPaths are interpreted as
+// gitignore-style patterns (path globs, "/" anchoring, "!" negation, dir-only
+// trailing "/") via go-git's gitignore matcher.
 func NewArchiver(basePath string, writer *tar.Writer, excludedPaths []string) *Archiver {
+	patterns := make([]gitignore.Pattern, 0, len(excludedPaths))
+	for _, p := range excludedPaths {
+		p = strings.TrimSpace(p)
+		if p == "" || strings.HasPrefix(p, "#") {
+			continue
+		}
+		patterns = append(patterns, gitignore.ParsePattern(p, nil))
+	}
 	return &Archiver{
 		basePath:     basePath,
 		writer:       writer,
 		writtenFiles: map[string]bool{},
-
-		excludedPaths: excludedPaths,
+		matcher:      gitignore.NewMatcher(patterns),
 	}
 }
 
@@ -96,8 +104,7 @@ func (a *Archiver) AddToArchive(relativePath string) error {
 	}
 
 	if stat.IsDir() {
-		// check if excluded
-		if a.isExcluded(path.Clean(relativePath) + "/") {
+		if a.isExcluded(path.Clean(relativePath), true) {
 			return nil
 		}
 
@@ -105,21 +112,17 @@ func (a *Archiver) AddToArchive(relativePath string) error {
 		return a.tarFolder(relativePath, stat)
 	}
 
-	// check if excluded
-	if a.isExcluded(path.Clean(relativePath)) {
+	if a.isExcluded(path.Clean(relativePath), false) {
 		return nil
 	}
 	return a.tarFile(relativePath, stat)
 }
 
-func (a *Archiver) isExcluded(relativePath string) bool {
-	for _, excludePath := range a.excludedPaths {
-		if strings.HasPrefix(relativePath, excludePath) {
-			return true
-		}
+func (a *Archiver) isExcluded(relativePath string, isDir bool) bool {
+	if relativePath == "" || relativePath == "." {
+		return false
 	}
-
-	return false
+	return a.matcher.Match(strings.Split(relativePath, "/"), isDir)
 }
 
 func (a *Archiver) tarFolder(target string, targetStat os.FileInfo) error {
