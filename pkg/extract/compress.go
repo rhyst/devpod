@@ -3,7 +3,6 @@ package extract
 import (
 	"archive/tar"
 	"compress/gzip"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,6 +20,18 @@ func WriteTarExclude(
 	localPath string,
 	compress bool,
 	excludedPaths []string,
+) error {
+	return WriteTarMatch(writer, localPath, compress, NewPatternMatcher(excludedPaths))
+}
+
+// WriteTarMatch is like WriteTarExclude but takes a prebuilt gitignore.Matcher,
+// letting callers supply matchers built from richer sources (e.g. a tree of
+// nested .gitignore files via gitignore.ReadPatterns).
+func WriteTarMatch(
+	writer io.Writer,
+	localPath string,
+	compress bool,
+	matcher gitignore.Matcher,
 ) error {
 	absolute, err := filepath.Abs(localPath)
 	if err != nil {
@@ -48,17 +59,33 @@ func WriteTarExclude(
 
 	// When its a file we copy the file to the toplevel of the tar
 	if !stat.IsDir() {
-		return NewArchiver(filepath.Dir(absolute), tarWriter, excludedPaths).
+		return NewArchiver(filepath.Dir(absolute), tarWriter, matcher).
 			AddToArchive(filepath.Base(absolute))
 	}
 
 	// When its a folder we copy the contents and not the folder itself to the
 	// toplevel of the tar
-	return NewArchiver(absolute, tarWriter, excludedPaths).AddToArchive("")
+	return NewArchiver(absolute, tarWriter, matcher).AddToArchive("")
 }
 
 func WriteTar(writer io.Writer, localPath string, compress bool) error {
 	return WriteTarExclude(writer, localPath, compress, nil)
+}
+
+// NewPatternMatcher compiles a list of gitignore-style pattern lines into a
+// gitignore.Matcher. Blank lines and "#" comments are skipped. All patterns
+// share the root domain, which matches what we want when the patterns come
+// from a single root-level ignore file.
+func NewPatternMatcher(excludedPaths []string) gitignore.Matcher {
+	patterns := make([]gitignore.Pattern, 0, len(excludedPaths))
+	for _, p := range excludedPaths {
+		p = strings.TrimSpace(p)
+		if p == "" || strings.HasPrefix(p, "#") {
+			continue
+		}
+		patterns = append(patterns, gitignore.ParsePattern(p, nil))
+	}
+	return gitignore.NewMatcher(patterns)
 }
 
 // Archiver is responsible for compressing specific files and folders within a target directory.
@@ -70,23 +97,18 @@ type Archiver struct {
 	matcher gitignore.Matcher
 }
 
-// NewArchiver creates a new archiver. excludedPaths are interpreted as
-// gitignore-style patterns (path globs, "/" anchoring, "!" negation, dir-only
-// trailing "/") via go-git's gitignore matcher.
-func NewArchiver(basePath string, writer *tar.Writer, excludedPaths []string) *Archiver {
-	patterns := make([]gitignore.Pattern, 0, len(excludedPaths))
-	for _, p := range excludedPaths {
-		p = strings.TrimSpace(p)
-		if p == "" || strings.HasPrefix(p, "#") {
-			continue
-		}
-		patterns = append(patterns, gitignore.ParsePattern(p, nil))
+// NewArchiver creates a new archiver scoped to basePath. Paths added to the
+// archive are matched against matcher; entries that match are skipped and
+// directories that match are not recursed into.
+func NewArchiver(basePath string, writer *tar.Writer, matcher gitignore.Matcher) *Archiver {
+	if matcher == nil {
+		matcher = gitignore.NewMatcher(nil)
 	}
 	return &Archiver{
 		basePath:     basePath,
 		writer:       writer,
 		writtenFiles: map[string]bool{},
-		matcher:      gitignore.NewMatcher(patterns),
+		matcher:      matcher,
 	}
 }
 
@@ -161,54 +183,78 @@ func (a *Archiver) tarFolder(target string, targetStat os.FileInfo) error {
 }
 
 func (a *Archiver) tarFile(target string, targetStat os.FileInfo) error {
-	var err error
-	filepath := path.Join(a.basePath, target)
+	filePath := path.Join(a.basePath, target)
 
-	// don't resolve symlinks
-	linkName := ""
+	// Symlinks: header only, no body. Read the link from the Lstat path.
 	if targetStat.Mode()&os.ModeSymlink == os.ModeSymlink {
-		linkName, err = os.Readlink(filepath)
+		linkName, err := os.Readlink(filePath)
 		if err != nil {
 			return nil
 		}
+		return a.writeFileHeader(target, targetStat, linkName)
 	}
 
-	hdr, err := tar.FileInfoHeader(targetStat, linkName)
+	// For regular files, open before writing the header so the size we
+	// declare matches what we can actually deliver. Skipping a file after the
+	// header is written corrupts the tar stream for every subsequent entry.
+	f, err := os.Open(filePath) // #nosec G304
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return nil
+	}
+
+	if err := a.writeFileHeader(target, fi, ""); err != nil {
+		return err
+	}
+
+	if !fi.Mode().IsRegular() {
+		return nil
+	}
+
+	// Bound the read to the size we declared and pad with zeros if the file
+	// shrinks before we finish, so the body always matches the header size.
+	copied, err := io.Copy(a.writer, io.LimitReader(f, fi.Size()))
+	if err != nil {
+		return fmt.Errorf("tar copy file: %w", err)
+	}
+	if copied < fi.Size() {
+		if _, err := io.CopyN(a.writer, zeroReader{}, fi.Size()-copied); err != nil {
+			return fmt.Errorf("tar pad file: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (a *Archiver) writeFileHeader(target string, fi os.FileInfo, linkName string) error {
+	hdr, err := tar.FileInfoHeader(fi, linkName)
 	if err != nil {
 		return fmt.Errorf("create tar file info header: %w", err)
 	}
 	hdr.Name = target
 	hdr.Uid = 0
 	hdr.Gid = 0
-	hdr.Mode = fillGo18FileTypeBits(int64(chmodTarEntry(os.FileMode(hdr.Mode))), targetStat)
-	hdr.ModTime = time.Unix(targetStat.ModTime().Unix(), 0)
-
+	hdr.Mode = fillGo18FileTypeBits(int64(chmodTarEntry(os.FileMode(hdr.Mode))), fi) // #nosec G115
+	hdr.ModTime = time.Unix(fi.ModTime().Unix(), 0)
 	if err := a.writer.WriteHeader(hdr); err != nil {
 		return fmt.Errorf("tar write header: %w", err)
 	}
-
-	// nothing more to do for non-regular
-	if !targetStat.Mode().IsRegular() {
-		a.writtenFiles[target] = true
-		return nil
-	}
-
-	// Case regular file
-	f, err := os.Open(filepath)
-	if err != nil {
-		// We ignore open file and just treat it as okay
-		return nil
-	}
-	defer func() { _ = f.Close() }()
-	copied, err := io.CopyN(a.writer, f, targetStat.Size())
-	if err != nil {
-		return fmt.Errorf("tar copy file: %w", err)
-	} else if copied != targetStat.Size() {
-		return errors.New("tar: file truncated during read")
-	}
-
 	a.writtenFiles[target] = true
 	return nil
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
 }
 
 const (
