@@ -349,6 +349,7 @@ func (r *runner) runContainer(
 	if ok {
 		return dockerDriver.RunDockerDevContainer(ctx, &driver.RunDockerDevContainerParams{
 			WorkspaceID:          r.ID,
+			ContainerName:        r.WorkspaceConfig.CLIOptions.ContainerName,
 			Options:              runOptions,
 			ParsedConfig:         parsedConfig.Config,
 			IDE:                  r.WorkspaceConfig.Workspace.IDE.Name,

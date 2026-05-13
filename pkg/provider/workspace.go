@@ -233,6 +233,7 @@ type CLIOptions struct {
 	Userns                      string            `json:"userns,omitempty"`
 	UidMap                      []string          `json:"uidMap,omitempty"`
 	GidMap                      []string          `json:"gidMap,omitempty"`
+	ContainerName               string            `json:"containerName,omitempty"`
 
 	// build options
 	// Repository specifies the container registry repository to push the built image to (e.g., ghcr.io/user/image).

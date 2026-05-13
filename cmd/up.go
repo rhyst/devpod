@@ -164,6 +164,10 @@ func (cmd *UpCmd) registerDevContainerFlags(upCmd *cobra.Command) {
 	upCmd.Flags().
 		StringVar(&cmd.AdditionalFeatures, "additional-features", "",
 			`Additional features to apply to the dev container (JSON as per "features" section in devcontainer.json)`)
+	upCmd.Flags().
+		StringVar(&cmd.ContainerName, "container-name", "",
+			"Override the Docker container name. Takes precedence over `runArgs: [\"--name\", ...]` "+
+				"in devcontainer.json. Only applies to the Docker driver.")
 }
 
 func (cmd *UpCmd) registerIDEFlags(upCmd *cobra.Command) {

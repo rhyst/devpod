@@ -14,6 +14,7 @@ import (
 
 type RunDockerDevContainerParams struct {
 	WorkspaceID          string
+	ContainerName        string
 	Options              *RunOptions
 	ParsedConfig         *config.DevContainerConfig
 	IDE                  string

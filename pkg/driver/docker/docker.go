@@ -509,6 +509,7 @@ func (d *dockerDriver) buildRunArgs(
 		addLabels().
 		addGPU().
 		addRunArgs().
+		addContainerName().
 		addDetached().
 		addEntrypoint().
 		addImage()
@@ -586,6 +587,16 @@ func (b *runArgsBuilder) addGPU() *runArgsBuilder {
 
 func (b *runArgsBuilder) addRunArgs() *runArgsBuilder {
 	b.args = append(b.args, b.params.ParsedConfig.RunArgs...)
+	return b
+}
+
+// addContainerName appends `--name <name>` if a CLI override was supplied. It
+// runs after addRunArgs so the CLI flag wins over any `--name` baked into
+// devcontainer.json's runArgs (Docker uses the last `--name` on the line).
+func (b *runArgsBuilder) addContainerName() *runArgsBuilder {
+	if b.params.ContainerName != "" {
+		b.args = append(b.args, "--name", b.params.ContainerName)
+	}
 	return b
 }
 
