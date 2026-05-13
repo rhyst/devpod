@@ -8,9 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
+	"github.com/go-git/go-billy/v5/osfs"
+	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"github.com/moby/patternmatcher/ignorefile"
 	"github.com/skevetter/api/pkg/devsy"
 	"github.com/skevetter/devpod/pkg/agent/tunnel"
@@ -445,10 +446,10 @@ func (t *tunnelServer) StreamWorkspace(
 		return fmt.Errorf("workspace is nil")
 	}
 
-	excludes := t.loadStreamExcludes(t.workspace.Source.LocalFolder)
+	matcher := t.loadStreamMatcher(t.workspace.Source.LocalFolder)
 
 	buf := bufio.NewWriterSize(NewStreamWriter(stream, t.log), 10*1024)
-	err := extract.WriteTarExclude(buf, t.workspace.Source.LocalFolder, false, excludes)
+	err := extract.WriteTarMatch(buf, t.workspace.Source.LocalFolder, false, matcher)
 	if err != nil {
 		return err
 	}
@@ -479,13 +480,13 @@ func (t *tunnelServer) StreamMount(
 		return fmt.Errorf("mount %s is not allowed to download", message.Mount)
 	}
 
-	excludes := []string{}
+	var matcher gitignore.Matcher
 	if t.workspace != nil {
-		excludes = t.loadStreamExcludes(t.workspace.Source.LocalFolder)
+		matcher = t.loadStreamMatcher(t.workspace.Source.LocalFolder)
 	}
 
 	buf := bufio.NewWriterSize(NewStreamWriter(stream, t.log), 10*1024)
-	err := extract.WriteTarExclude(buf, mount.Source, false, excludes)
+	err := extract.WriteTarMatch(buf, mount.Source, false, matcher)
 	if err != nil {
 		return err
 	}
@@ -494,24 +495,36 @@ func (t *tunnelServer) StreamMount(
 	return buf.Flush()
 }
 
-// loadStreamExcludes reads the workspace's exclude patterns for upload. Both
-// .gitignore and .devpodignore are honored, with .devpodignore evaluated last
-// so it can override .gitignore via `!` negation. Missing files are silently
-// skipped; malformed files log a warning and contribute nothing.
-func (t *tunnelServer) loadStreamExcludes(folder string) []string {
-	excludes := []string{}
-	for _, name := range []string{".gitignore", pkgconfig.IgnoreFileName} {
-		f, err := os.Open(filepath.Join(folder, name))
-		if err != nil {
-			continue
-		}
-		patterns, err := ignorefile.ReadAll(f)
+// loadStreamMatcher builds the gitignore matcher used to decide which files
+// to include in a workspace upload. It walks the tree from `folder` reading
+// every .gitignore (root and nested) via go-git's ReadPatterns, which scopes
+// each nested file to its containing directory. .devpodignore is layered on
+// top so it can override .gitignore via `!` negation.
+func (t *tunnelServer) loadStreamMatcher(folder string) gitignore.Matcher {
+	patterns, err := gitignore.ReadPatterns(osfs.New(folder), nil)
+	if err != nil {
+		t.log.Warnf("error reading .gitignore files under %s: error=%v", folder, err)
+	}
+
+	root, err := os.OpenRoot(folder)
+	if err != nil {
+		t.log.Warnf("error opening workspace folder %s: error=%v", folder, err)
+		return gitignore.NewMatcher(patterns)
+	}
+	defer func() { _ = root.Close() }()
+
+	f, err := root.Open(pkgconfig.IgnoreFileName)
+	if err == nil {
+		lines, err := ignorefile.ReadAll(f)
 		_ = f.Close()
 		if err != nil {
-			t.log.Warnf("error reading %s file: error=%v", name, err)
-			continue
+			t.log.Warnf("error reading %s: error=%v", pkgconfig.IgnoreFileName, err)
+		} else {
+			for _, line := range lines {
+				patterns = append(patterns, gitignore.ParsePattern(line, nil))
+			}
 		}
-		excludes = append(excludes, patterns...)
 	}
-	return excludes
+
+	return gitignore.NewMatcher(patterns)
 }
