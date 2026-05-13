@@ -445,18 +445,10 @@ func (t *tunnelServer) StreamWorkspace(
 		return fmt.Errorf("workspace is nil")
 	}
 
-	// Get .devpodignore files to exclude
-	excludes := []string{}
-	f, err := os.Open(filepath.Join(t.workspace.Source.LocalFolder, pkgconfig.IgnoreFileName))
-	if err == nil {
-		excludes, err = ignorefile.ReadAll(f)
-		if err != nil {
-			t.log.Warnf("error reading %s file: error=%v", pkgconfig.IgnoreFileName, err)
-		}
-	}
+	excludes := t.loadStreamExcludes(t.workspace.Source.LocalFolder)
 
 	buf := bufio.NewWriterSize(NewStreamWriter(stream, t.log), 10*1024)
-	err = extract.WriteTarExclude(buf, t.workspace.Source.LocalFolder, false, excludes)
+	err := extract.WriteTarExclude(buf, t.workspace.Source.LocalFolder, false, excludes)
 	if err != nil {
 		return err
 	}
@@ -487,16 +479,9 @@ func (t *tunnelServer) StreamMount(
 		return fmt.Errorf("mount %s is not allowed to download", message.Mount)
 	}
 
-	// Get .devpodignore files to exclude
 	excludes := []string{}
 	if t.workspace != nil {
-		f, err := os.Open(filepath.Join(t.workspace.Source.LocalFolder, pkgconfig.IgnoreFileName))
-		if err == nil {
-			excludes, err = ignorefile.ReadAll(f)
-			if err != nil {
-				t.log.Warnf("error reading %s file: error=%v", pkgconfig.IgnoreFileName, err)
-			}
-		}
+		excludes = t.loadStreamExcludes(t.workspace.Source.LocalFolder)
 	}
 
 	buf := bufio.NewWriterSize(NewStreamWriter(stream, t.log), 10*1024)
@@ -507,4 +492,26 @@ func (t *tunnelServer) StreamMount(
 
 	// make sure buffer is flushed
 	return buf.Flush()
+}
+
+// loadStreamExcludes reads the workspace's exclude patterns for upload. Both
+// .gitignore and .devpodignore are honored, with .devpodignore evaluated last
+// so it can override .gitignore via `!` negation. Missing files are silently
+// skipped; malformed files log a warning and contribute nothing.
+func (t *tunnelServer) loadStreamExcludes(folder string) []string {
+	excludes := []string{}
+	for _, name := range []string{".gitignore", pkgconfig.IgnoreFileName} {
+		f, err := os.Open(filepath.Join(folder, name))
+		if err != nil {
+			continue
+		}
+		patterns, err := ignorefile.ReadAll(f)
+		_ = f.Close()
+		if err != nil {
+			t.log.Warnf("error reading %s file: error=%v", name, err)
+			continue
+		}
+		excludes = append(excludes, patterns...)
+	}
+	return excludes
 }
