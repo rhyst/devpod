@@ -1,0 +1,58 @@
+name: Fork Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: New version tag to create and release (e.g. v0.23.0)
+        required: true
+      ref:
+        description: Branch or commit to tag (default main)
+        required: false
+        default: main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release CLI binaries
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - name: Create and push tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git tag ${{ inputs.tag }}
+          git push origin ${{ inputs.tag }}
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: build --clean --skip=before --id devpod --snapshot
+        env:
+          DEVPOD_CLI_VERSION: ${{ inputs.tag || github.ref_name }}
+
+      - name: Collect binaries and checksums
+        run: |
+          mkdir -p release-assets
+          find dist -type f -name 'devpod-*' -exec cp {} release-assets/ \;
+          cd release-assets
+          sha256sum * > checksums.txt
+          ls -la
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release-assets/*
+          generate_release_notes: true
