@@ -1,7 +1,7 @@
 package config
 
 const (
-	RepoOwner         = "skevetter"
+	RepoOwner         = "rhyst"
 	RepoName          = "devpod"
 	RepoSlug          = RepoOwner + "/" + RepoName
 	GitHubRepoURL     = "https://github.com/" + RepoSlug
